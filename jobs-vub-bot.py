@@ -3,7 +3,6 @@ from lxml import html
 import re
 import sqlite3
 from telegram.ext import Updater, CommandHandler, Job
-import time
 import logging
 from datetime import datetime
 
