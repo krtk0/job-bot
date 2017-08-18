@@ -123,7 +123,6 @@ def parse_jobs(bot, job):
     Parse the VUB student jobs website to find new posted jobs
     and push them to Telegram
     """
-    # bot.send_message(chat_id=update.message.chat_id, text='You will be notified about newposted student jobs at VUB.')
     dbc = Connection()
     # logging.info('Connection with DB established')
     url = 'http://jobs.vub.ac.be/jobs'
@@ -194,6 +193,7 @@ def start_com(bot, update):
 
 def stop_com(bot, update):
     """
+    COMMAND /stop
     Unsubscribe user from job updates
     """
     dbc = Connection()
