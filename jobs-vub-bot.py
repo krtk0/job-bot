@@ -12,7 +12,7 @@ logger.setLevel(logging.INFO)
 
 "Get a telegram bot token"
 TOKEN = ''
-with open('PATH TO TOKEN', 'r') as token:
+with open(PATH_TO_TOKEN, 'r') as token:
     for line in token:
         TOKEN += line
 
@@ -25,7 +25,7 @@ class Connection:
         """
         Open database connection
         """
-        self.dbc = sqlite3.connect('PATH TO SQLite DATABASE')
+        self.dbc = sqlite3.connect(PATH_TO_DATABASE)
         self.dbc.row_factory = sqlite3.Row
         self.c = self.dbc.cursor()
 
@@ -70,17 +70,27 @@ class Query:
             INSERT INTO jobs (job_id, job_title) VALUES (?, ?)
         """
         dbc.do(sql, job_id, job_title)
-        logging.info('{0:%Y-%b-%d %H:%M:%S} Job {1} added'.format(datetime.now(), job_id))
+        logging.info('{0:%Y-%b-%d %H:%M:%S} Job {1} added'.format(datetime.now(),
+                                                                  job_id))
 
     @classmethod
-    def add_to_sublist(cls, dbc, chat_id):
+    def add_to_sublist(cls, dbc, chat_id, username=None, first_name=None,
+                       last_name=None):
         """
         Add user to the sublist
         """
+        if not username:
+            username = ''
+        if not first_name:
+            first_name = ''
+        if not last_name:
+            last_name = ''
         sql = """
-            INSERT INTO subscribers (chat_id) VALUES (?)
+            INSERT INTO subscribers (chat_id, user_name, first_name, last_name)
+                   VALUES (?, ?, ?, ?)
         """
-        return Connection.do(dbc, sql, chat_id)
+        return Connection.do(dbc, sql, chat_id, username, first_name,
+                             last_name)
 
     @classmethod
     def remove_from_sublist(cls, dbc, chat_id):
@@ -116,6 +126,17 @@ class Query:
             WHERE chat_id = ?
         """
         return Connection.do(dbc, sql, chat_id)
+
+    @classmethod
+    def count_subs(cls, dbc):
+        """
+        Get the total number of subscribers
+        """
+        sql = """
+            SELECT COUNT(*) as total
+            FROM subscribers
+        """
+        return Connection.do(dbc, sql)
 
 
 def parse_jobs(bot, job):
@@ -153,21 +174,20 @@ def parse_jobs(bot, job):
         if _job_new:
             Query.add_job(dbc, ids[i], titles[i])
             url_job += ids[i]
-            logging.info('{0:%Y-%b-%d %H:%M:%S} New job is posted: {1}'.format(datetime.now(), url_job))
+            logging.info('{0:%Y-%b-%d %H:%M:%S} New job is posted: {1}'.format(datetime.now(),
+                                                                               url_job))
             subs = Query.get_subs(dbc)
             if subs:
                 _count = 0
                 for sub in subs:
                     "Push to Telegram"
-                    bot.send_message(chat_id=sub['chat_id'], text='New job "{0}" is posted at {1}'.format(titles[i], url_job))
+                    bot.send_message(chat_id=sub['chat_id'],
+                                     text='New job "{0}" is posted at {1}'.format(titles[i], url_job))
                     _count += 1
                 logging.info('{2:%Y-%b-%d %H:%M:%S} Notification about the job {0} is sent to {1} user(s)'.format(ids[i],
                                                                                                                   _count,
                                                                                                                   datetime.now()))
-        else:
-            logging.info('{0:%Y-%b-%d %H:%M:%S} Nothing new found'.format(datetime.now()))
         i += 1
-
     i = None
     _job_new = None
     dbc.close()
@@ -182,12 +202,31 @@ def start_com(bot, update):
     dbc = Connection()
     on_sublist = Query.get_sub_one(dbc, str(update.message.chat_id))
     if not on_sublist:
-        Query.add_to_sublist(dbc, str(update.message.chat_id))
+        user = update.message.from_user
+        try:
+            un = user['username']
+        except KeyError:
+            un = None
+        try:
+            fn = user['first_name']
+        except KeyError:
+            fn = None
+        try:
+            ln = user['last_name']
+        except KeyError:
+            ln = None
+        Query.add_to_sublist(dbc, str(update.message.chat_id),
+                             username=un,
+                             first_name=fn,
+                             last_name=ln)
         logging.info('{1:%Y-%b-%d %H:%M:%S} User {0} is added on the sublist.'.format(update.message.chat_id,
                                                                                       datetime.now()))
-        bot.send_message(chat_id=update.message.chat_id, text='You will be notified about newposted student jobs at VUB.')
+        bot.send_message(chat_id=update.message.chat_id,
+                         text='You will be notified about newposted student '
+                         'jobs at VUB.')
     else:
-        bot.send_message(chat_id=update.message.chat_id, text='You are already subscribed.')
+        bot.send_message(chat_id=update.message.chat_id,
+                         text='You are already subscribed.')
     dbc.close()
 
 
@@ -200,8 +239,9 @@ def stop_com(bot, update):
     Query.remove_from_sublist(dbc, str(update.message.chat_id))
     logging.info('{1:%Y-%b-%d %H:%M:%S} User {0} is removed from the sublist.'.format(update.message.chat_id,
                                                                                       datetime.now()))
-    bot.send_message(chat_id=update.message.chat_id, text='You canceled your subscription successfully.'
-                                                              '\nSend me /start to subscribe again.')
+    bot.send_message(chat_id=update.message.chat_id,
+                     text='You canceled your subscription successfully.'
+                          '\nSend me /start to subscribe again.')
     dbc.close()
 
 
@@ -209,10 +249,37 @@ def help_com(bot, update):
     """
     COMMAND /help
     """
-    bot.send_message(chat_id=update.message.chat_id, text='Something helpful should be here.'
-                                                          '\n/start — subscribe for updates'
-                                                          '\n/stop – unsubscribe from updates'
-                                                          '\n/help – obviously')
+    bot.send_message(chat_id=update.message.chat_id,
+                     text='Something helpful should be here.'
+                          '\n/start — subscribe for updates'
+                          '\n/stop – unsubscribe from updates'
+                          '\n/help – obviously')
+
+
+def sub_com(bot, update):
+    """
+    COMMAND /sub
+    For admin's private usage. Get list and total number of subscribers
+    """
+    if update.message.chat_id == ID_ADMIN:
+        dbc = Connection()
+        subs = Query.get_subs(dbc)
+        sub_list = ''
+        for sub in subs:
+            sub_list += str(sub)
+            sub_list += '\n'
+        bot.send_message(chat_id=ID_ADMIN,
+                         text=sub_list)
+        total = Query.count_subs(dbc)[0]['total']
+        bot.send_message(chat_id=ID_ADMIN,
+                         text='Total: {0} sub(s).'.format(total))
+        dbc.close()
+    else:
+        guest = update.message.from_user
+        bot.send_message(chat_id=update.message.chat_id,
+                         text='Access denied.')
+        bot.send_message(chat_id=ID_ADMIN,
+                         text='{0} tried to get subs'.format(guest))
 
 
 def main():
@@ -223,6 +290,7 @@ def main():
     dp.add_handler(CommandHandler('start', start_com))
     dp.add_handler(CommandHandler('help', help_com))
     dp.add_handler(CommandHandler('stop', stop_com))
+    dp.add_handler(CommandHandler('sub', sub_com))
     j.put(Job(parse_jobs, 60.0), next_t=0.00)
 
     updater.start_polling()
