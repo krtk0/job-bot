@@ -1,7 +1,8 @@
 import requests
 from lxml import html
 import re
-import sqlite3
+import psycopg2
+import psycopg2.extras
 from telegram.ext import Updater, CommandHandler, Job
 import logging
 from datetime import datetime
@@ -12,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 "Get a telegram bot token"
 TOKEN = ''
-with open(PATH_TO_TOKEN, 'r') as token:
+with open(TOKENPATH, 'r') as token:
     for line in token:
         TOKEN += line
 
@@ -25,17 +26,19 @@ class Connection:
         """
         Open database connection
         """
-        self.dbc = sqlite3.connect(PATH_TO_DATABASE)
-        self.dbc.row_factory = sqlite3.Row
-        self.c = self.dbc.cursor()
+        self.dbc = psycopg2.connect(CONNECTION_PARAMS)
+        self.c = self.dbc.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     def do(self, sql, *args):
         """
         Execute SQL query
         """
-        result = self.c.execute(sql, tuple(args)).fetchall()
+        self.c.execute(sql, tuple(args))
         self.dbc.commit()
-        return [dict(row) for row in result]
+        try:
+            return self.c.fetchall()
+        except psycopg2.ProgrammingError:
+            return None
 
     def close(self):
         """
@@ -56,7 +59,7 @@ class Query:
         sql = """
             SELECT job_id
             FROM jobs
-            WHERE job_id=?
+            WHERE job_id=%s
         """
         result = dbc.do(sql, job_id)
         return False if len(result) > 0 else True
@@ -67,11 +70,10 @@ class Query:
         Add a new job to the database
         """
         sql = """
-            INSERT INTO jobs (job_id, job_title) VALUES (?, ?)
+            INSERT INTO jobs (job_id, job_title) VALUES (%s, %s)
         """
         dbc.do(sql, job_id, job_title)
-        logging.info('{0:%Y-%b-%d %H:%M:%S} Job {1} added'.format(datetime.now(),
-                                                                  job_id))
+        logging.info('{0:%Y-%b-%d %H:%M:%S} Job {1} added'.format(datetime.now(), job_id))
 
     @classmethod
     def add_to_sublist(cls, dbc, chat_id, username=None, first_name=None,
@@ -79,33 +81,14 @@ class Query:
         """
         Add user to the sublist
         """
-        if not username:
-            username = ''
-        if not first_name:
-            first_name = ''
-        if not last_name:
-            last_name = ''
         sql = """
-            INSERT INTO subscribers (chat_id, user_name, first_name, last_name)
-                   VALUES (?, ?, ?, ?)
+            INSERT INTO subscribers (chat_id, username, first_name, last_name)
+                   VALUES (%s, %s, %s, %s)
         """
-        return Connection.do(dbc, sql, chat_id, username, first_name,
-                             last_name)
+        return Connection.do(dbc, sql, chat_id, username, first_name, last_name)
 
     @classmethod
-    def remove_from_sublist(cls, dbc, chat_id):
-        """
-        Remove user from the sublist
-        """
-        sql = """
-                DELETE
-                FROM subscribers
-                WHERE chat_id = ?
-            """
-        return Connection.do(dbc, sql, chat_id)
-
-    @classmethod
-    def get_subs(cls, dbc):
+    def get_subs(cls, dbc, status=None):
         """
         Get all subscribers
         """
@@ -113,6 +96,11 @@ class Query:
             SELECT *
             FROM subscribers
         """
+        if status:
+            sql += """
+                WHERE status = %s
+            """
+            return Connection.do(dbc, sql, status)
         return Connection.do(dbc, sql)
 
     @classmethod
@@ -123,7 +111,7 @@ class Query:
         sql = """
             SELECT *
             FROM subscribers
-            WHERE chat_id = ?
+            WHERE chat_id = %s
         """
         return Connection.do(dbc, sql, chat_id)
 
@@ -137,6 +125,18 @@ class Query:
             FROM subscribers
         """
         return Connection.do(dbc, sql)
+
+    @classmethod
+    def set_subscription(cls, dbc, chat_id, subscription):
+        """
+        Set user's subscription status
+        """
+        sql = """
+                UPDATE subscribers
+                SET status = %s
+                WHERE chat_id = %s
+            """
+        return Connection.do(dbc, sql, subscription, chat_id)
 
 
 def parse_jobs(bot, job):
@@ -174,9 +174,8 @@ def parse_jobs(bot, job):
         if _job_new:
             Query.add_job(dbc, ids[i], titles[i])
             url_job += ids[i]
-            logging.info('{0:%Y-%b-%d %H:%M:%S} New job is posted: {1}'.format(datetime.now(),
-                                                                               url_job))
-            subs = Query.get_subs(dbc)
+            logging.info('{0:%Y-%b-%d %H:%M:%S} New job is posted: {1}'.format(datetime.now(), url_job))
+            subs = Query.get_subs(dbc, status='active')
             if subs:
                 _count = 0
                 for sub in subs:
@@ -184,9 +183,10 @@ def parse_jobs(bot, job):
                     bot.send_message(chat_id=sub['chat_id'],
                                      text='New job "{0}" is posted at {1}'.format(titles[i], url_job))
                     _count += 1
-                logging.info('{2:%Y-%b-%d %H:%M:%S} Notification about the job {0} is sent to {1} user(s)'.format(ids[i],
-                                                                                                                  _count,
-                                                                                                                  datetime.now()))
+                    logging.info(
+                        '{2:%Y-%b-%d %H:%M:%S} Notification about the job {0} is sent to {1} user(s)'.format(ids[i],
+                                                                                                             _count,
+                                                                                                             datetime.now()))
         i += 1
     i = None
     _job_new = None
@@ -224,6 +224,13 @@ def start_com(bot, update):
         bot.send_message(chat_id=update.message.chat_id,
                          text='You will be notified about newposted student '
                          'jobs at VUB.')
+    elif on_sublist[0]['status'] == 'inactive':
+        Query.set_subscription(dbc, update.message.chat_id, 'active')
+        bot.send_message(chat_id=update.message.chat_id,
+                         text='You will be notified about newposted student '
+                              'jobs at VUB.')
+        logging.info('{1:%Y-%b-%d %H:%M:%S} User {0} is added on the sublist.'.format(update.message.chat_id,
+                                                                                      datetime.now()))
     else:
         bot.send_message(chat_id=update.message.chat_id,
                          text='You are already subscribed.')
@@ -236,12 +243,16 @@ def stop_com(bot, update):
     Unsubscribe user from job updates
     """
     dbc = Connection()
-    Query.remove_from_sublist(dbc, str(update.message.chat_id))
-    logging.info('{1:%Y-%b-%d %H:%M:%S} User {0} is removed from the sublist.'.format(update.message.chat_id,
-                                                                                      datetime.now()))
-    bot.send_message(chat_id=update.message.chat_id,
-                     text='You canceled your subscription successfully.'
-                          '\nSend me /start to subscribe again.')
+    on_sublist = Query.get_sub_one(dbc, update.message.chat_id)
+    if on_sublist and on_sublist[0]['status'] != 'inactive':
+        Query.set_subscription(dbc, update.message.chat_id, 'inactive')
+        logging.info('{1:%Y-%b-%d %H:%M:%S} User {0} is removed from the sublist.'.format(update.message.chat_id,
+                                                                                          datetime.now()))
+        bot.send_message(chat_id=update.message.chat_id,
+                         text='You canceled your subscription successfully.'
+                              '\nSend me /start to subscribe again.')
+    else:
+        bot.send_message(chat_id=update.message.chat_id, text='You are not subscribed.')
     dbc.close()
 
 
@@ -266,7 +277,7 @@ def sub_com(bot, update):
         subs = Query.get_subs(dbc)
         sub_list = ''
         for sub in subs:
-            sub_list += str(sub)
+            sub_list += str_dict(sub)
             sub_list += '\n'
         bot.send_message(chat_id=ID_ADMIN,
                          text=sub_list)
@@ -280,6 +291,21 @@ def sub_com(bot, update):
                          text='Access denied.')
         bot.send_message(chat_id=ID_ADMIN,
                          text='{0} tried to get subs'.format(guest))
+
+
+def str_dict(dictio):
+    """
+    Transform dict with sub's data to a better format for reading
+    """
+    result = ''
+    keys = ['id', 'username', 'first_name', 'last_name', 'status']
+    for key in keys:
+        if key != 'chat_id' and dictio[key] not in ['', None]:
+            try:
+                result += '{0}: {1} '.format(key, dictio[key].upper())
+            except AttributeError:
+                result += '{0}: {1} '.format(key, dictio[key])
+    return result
 
 
 def main():
