@@ -3,7 +3,7 @@ from lxml import html
 import re
 import psycopg2
 import psycopg2.extras
-from telegram.ext import Updater, CommandHandler, Job
+from telegram.ext import Updater, CommandHandler, MessageHandler, Job, Filters
 import logging
 from datetime import datetime
 
@@ -293,6 +293,15 @@ def sub_com(bot, update):
                          text='{0} tried to get subs'.format(guest))
 
 
+def reply(bot, update):
+    """
+    Handle all non-command messages
+    """
+    bot.send_message(chat_id=update.message.chat_id,
+                     text='Seems like it is not a command, I cannot understand you.'
+                          '\nUse /help to get the full command-list.')
+
+
 def str_dict(dictio):
     """
     Transform dict with sub's data to a better format for reading
@@ -317,6 +326,7 @@ def main():
     dp.add_handler(CommandHandler('help', help_com))
     dp.add_handler(CommandHandler('stop', stop_com))
     dp.add_handler(CommandHandler('sub', sub_com))
+    dp.add_handler(MessageHandler(Filters.text, reply))
     j.put(Job(parse_jobs, 60.0), next_t=0.00)
 
     updater.start_polling()
